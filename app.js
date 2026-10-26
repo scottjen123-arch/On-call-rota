@@ -231,6 +231,7 @@ const S = {
   navigated: false,
   mode: "loading",          // loading | shared | join | local | demo
   offline: false,
+  admin: false,             // organiser: may build the rota and edit the team (shared mode)
   joinError: null,
   team: null,               // [{id, name}]
   shift: { ...DEFAULT_SHIFT },
@@ -247,6 +248,8 @@ const S = {
   teamDraft: null,
 };
 const curRota = () => S.rotas[S.start] || null;
+// Only the organiser builds and edits the rota; in this-browser-only and example modes, you're the organiser.
+const canManage = () => S.mode !== "shared" || S.admin;
 
 /* ---------- storage ---------- */
 // Shared data lives in a Google Sheet, reached through its Apps Script web app (config.js → apiUrl).
@@ -254,7 +257,7 @@ const curRota = () => S.rotas[S.start] || null;
 // rotas/<start date> (one fortnight). Every request carries the team key from the team link.
 const API = ((window.ROTA_CONFIG && window.ROTA_CONFIG.apiUrl) || "").trim();
 const POLL_MS = 20000;
-let teamKey = null, pollTimer = null, loading = false, reloadAfter = false, writeSeq = 0, sheetUrl = "", lastSig = "";
+let teamKey = null, adminKey = null, pollTimer = null, loading = false, reloadAfter = false, writeSeq = 0, sheetUrl = "", lastSig = "";
 let L = null; // local / demo store: {team, shift, opts, anchor, avail: {month: {mid: days}}, rotas: {start: rota}}
 const pending = {}, timers = {}, chains = {}; // pending: path -> {data} not yet confirmed by the sheet
 
@@ -283,7 +286,7 @@ function setAnchor(a) {
 async function call(body) {
   let res;
   try {
-    res = await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ k: teamKey, ...body }) });
+    res = await fetch(API, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ k: teamKey, ...(adminKey ? { a: adminKey } : {}), ...body }) });
   } catch { throw { code: "network" }; }
   if (!res.ok) throw { code: "network" };
   let out;
@@ -299,6 +302,11 @@ function chain(path, fn) {
 function onWriteError(e) {
   const code = e && e.code;
   if (code === "bad_key") return badKey();
+  if (code === "organiser_only") {
+    S.admin = false;
+    S.notice = { kind: "warn", text: "Only the rota organiser can build the rota or change the team. Your availability still saves as normal." };
+    loadShared(); render(); return;
+  }
   S.notice = { kind: "warn", text: code === "network"
     ? "That change didn’t save because the rota couldn’t reach the Google Sheet. Check your connection and try again."
     : "That change didn’t save. Try again in a moment." };
@@ -306,7 +314,7 @@ function onWriteError(e) {
 }
 function badKey() {
   stopShared();
-  teamKey = null; lsSet("rota-key", "");
+  teamKey = adminKey = null; lsSet("rota-key", ""); lsSet("rota-admin", "");
   S.mode = "join";
   S.joinError = "That team link isn’t valid any more. Ask whoever runs the rota for the current link.";
   render();
@@ -318,7 +326,7 @@ function write(path, data, extra) {
   pending[path] = entry; writeSeq++;
   return chain(path, () => call({ action: data ? "set" : "delete", path, data, ...(extra || {}) }))
     .then(() => { if (pending[path] === entry) delete pending[path]; writeSeq++; S.offline = false; })
-    .catch(e => { if (pending[path] === entry) delete pending[path]; writeSeq++; onWriteError(e); });
+    .catch(e => { if (pending[path] === entry) delete pending[path]; writeSeq++; lastSig = ""; onWriteError(e); });
 }
 
 // The readable "Rota …" tab in the Google Sheet for one fortnight.
@@ -388,6 +396,7 @@ async function loadShared() {
     else if (S.mode === "shared") {
       lastSig = sig;
       sheetUrl = out.sheetUrl || "";
+      S.admin = out.admin === true;
       S.availBy = {}; S.rotas = {};
       applyRecord("settings/team", out.team);
       (out.availability || []).forEach(d => applyRecord("availability/" + d.month + "_" + d.memberId, d));
@@ -426,10 +435,15 @@ function startShared() {
 function stopShared() { clearInterval(pollTimer); pollTimer = null; }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.mode === "shared") loadShared(); });
 
-function joinWith(key) {
-  key = String(key || "").trim().replace(/^.*#k=/, "");
+// Accepts a team link, an organiser link (…#k=…&a=…) or a bare team key.
+function joinWith(input) {
+  const str = String(input || "").trim();
+  const k = /[#&]k=([A-Za-z0-9_-]+)/.exec(str), a = /[#&]a=([A-Za-z0-9_-]+)/.exec(str);
+  const key = k ? k[1] : str;
   if (!/^[A-Za-z0-9_-]{8,}$/.test(key)) { S.joinError = "That doesn’t look like a team key. Paste the whole team link or the key from the Setup tab."; render(); return; }
-  teamKey = key; lsSet("rota-key", key);
+  if (a) adminKey = a[1];
+  else if (key !== teamKey) adminKey = null;
+  teamKey = key; lsSet("rota-key", key); lsSet("rota-admin", adminKey || "");
   startShared();
 }
 function teamLink() { return location.origin + location.pathname + "#k=" + (teamKey || ""); }
@@ -618,7 +632,7 @@ function buildInto(start, seed) {
 }
 
 function generate(fresh) {
-  if (S.readOnly || !(S.team || []).length) return;
+  if (!canManage() || !(S.team || []).length) return;
   S.busy = true; render();
   setTimeout(() => {
     buildInto(S.start, fresh ? (Math.random() * 4294967296) >>> 0 : 1);
@@ -630,7 +644,7 @@ function generate(fresh) {
 }
 function editRota(fn) {
   const rota = curRota();
-  if (!rota || S.readOnly) return;
+  if (!rota || !canManage()) return;
   rota.locked = rota.locked || {}; rota.agreed = rota.agreed || {};
   fn(rota);
   Store.saveRota(S.start, rota);
@@ -711,7 +725,7 @@ function render() {
 
 function header() {
   const status = S.mode === "shared" && S.offline ? `<span class="status demo"><span class="dot"></span>Can’t reach the Google Sheet · retrying</span>`
-    : S.mode === "shared" ? `<span class="status shared"><span class="dot"></span>Shared with your team · saves to Google Sheets</span>`
+    : S.mode === "shared" ? `<span class="status shared"><span class="dot"></span>${S.admin ? "Organiser · " : ""}Shared with your team · saves to Google Sheets</span>`
     : S.mode === "join" ? `<span class="status"><span class="dot"></span>Not joined yet</span>`
     : S.mode === "demo" ? `<span class="status demo"><span class="dot"></span>Example data · not saved</span>`
     : S.mode === "local" ? `<span class="status"><span class="dot"></span>Saved in this browser only</span>`
@@ -734,9 +748,9 @@ function notices() {
 }
 
 function tabs() {
-  const t = [["avail", "1", "Availability"], ["rota", "2", "Rota"], ["team", "", "Team & shifts"]];
+  const t = [["avail", "1", "Availability"], ["rota", "2", "Rota"]].concat(canManage() ? [["team", "", "Team & shifts"]] : []);
   return `<nav class="tabs" role="tablist">${t.map(([id, n, label]) =>
-    `<button class="tab" role="tab" id="tab-${id}" aria-selected="${S.tab === id}" data-act="tab" data-tab="${id}">${n ? `<span class="n">${n}</span>` : ""}${label}</button>`).join("")}</nav>`;
+    `<button class="tab" role="tab" id="tab-${id}" aria-selected="${(S.tab === "team" && !canManage() ? "avail" : S.tab) === id}" data-act="tab" data-tab="${id}">${n ? `<span class="n">${n}</span>` : ""}${label}</button>`).join("")}</nav>`;
 }
 
 function body() {
@@ -756,8 +770,13 @@ function body() {
     return `<section class="panel"><div class="empty-state"><span class="eyebrow">Loading</span><h2>Opening the rota…</h2><p class="muted">Fetching your team and this fortnight’s availability.</p>
       <div class="row"><button class="btn" data-act="demo">Try it with an example team</button></div></div></section>`;
   }
-  if (!S.team.length) return teamView(true);
-  return tabs() + (S.tab === "rota" ? rotaView() : S.tab === "team" ? teamView(false) : availView());
+  if (!S.team.length) {
+    if (canManage()) return teamView(true);
+    return `<section class="panel"><div class="empty-state"><span class="eyebrow">Almost ready</span><h2>The rota hasn’t been set up yet</h2>
+      <p class="muted">The organiser needs to add the team first. Check back soon; this page updates by itself.</p></div></section>`;
+  }
+  const tab = S.tab === "team" && !canManage() ? "avail" : S.tab;
+  return tabs() + (tab === "rota" ? rotaView() : tab === "team" ? teamView(false) : availView());
 }
 
 /* Availability */
@@ -827,10 +846,10 @@ function coverageView() {
   const list = arr => arr.map(shortDate).join(", ");
   return `<section class="panel">
     <div class="row between"><div class="stack" style="gap:2px"><span class="eyebrow">Team coverage</span><h2>${okCount} of ${dates.length} days covered by availability</h2></div>
-      <button class="btn primary" data-act="generate" ${S.readOnly ? "disabled" : ""}>Build the rota</button></div>
+      ${canManage() ? `<button class="btn primary" data-act="generate">Build the rota</button>` : ""}</div>
     ${none.length ? `<p><strong style="color:var(--gap)">Nobody available:</strong> ${list(none)}</p>` : ""}
     ${part.length ? `<p><strong style="color:var(--warn)">Only one half covered:</strong> ${list(part)}</p>` : ""}
-    ${none.length || part.length ? `<p class="muted" style="font-size:.88rem">The planner still fills these, choosing whoever has done the least on-call and had the longest break. They’re marked “Check” on the rota so you know who to ask.</p>` : ""}
+    ${(none.length || part.length) && canManage() ? `<p class="muted" style="font-size:.88rem">The planner still fills these, choosing whoever has done the least on-call and had the longest break. They’re marked “Check” on the rota so you know who to ask.</p>` : ""}
     <div class="scroll"><table class="matrix"><thead>${head}</thead><tbody>${rows}${covRow}</tbody></table></div>
     <div class="legend"><span><span class="cov"></span> both halves coverable</span><span><span class="cov part"></span> one half only</span><span><span class="cov none"></span> nobody</span></div>
   </section>`;
@@ -849,11 +868,16 @@ function rotaView() {
       <label class="check"><input type="checkbox" id="opt-b2b" data-act="opt" data-k="avoidBackToBack" ${S.opts.avoidBackToBack ? "checked" : ""} ${S.readOnly ? "disabled" : ""}><span>Avoid back-to-back days for the same person</span></label>
     </div>`;
   const busy = S.busy ? `<span class="spin"></span>` : "";
+  const manage = canManage(), slotOff = manage ? "" : "disabled";
+  if (!rota && !manage) {
+    return `<section class="panel"><div class="empty-state"><span class="eyebrow">${periodLabel(S.start)}</span><h2>No rota yet for this fortnight</h2>
+      <p class="muted">The organiser builds the rota once everyone has marked their availability. Add yours on the Availability tab; the rota appears here when it’s ready.</p></div></section>`;
+  }
   if (!rota) {
     return `<section class="panel"><div class="empty-state"><span class="eyebrow">${periodLabel(S.start)}</span><h2>No rota yet for this fortnight</h2>
       <p class="muted">Once everyone has marked their availability, build the rota. Every ${esc(halfName(0).toLowerCase())} and ${esc(halfName(1).toLowerCase())} half gets someone. People who offered a shift are always used first, and shifts and weekends are shared as evenly as possible, counting the previous rotas too. If nobody offered a shift, it goes to whoever has done the least and had the longest break, and it’s flagged so you can check with them.</p>
       ${opts}
-      <div class="row"><button class="btn primary" data-act="generate" ${S.readOnly ? "disabled" : ""}>${busy}Build the rota</button></div></div></section>`;
+      <div class="row"><button class="btn primary" data-act="generate">${busy}Build the rota</button></div></div></section>`;
   }
   const { gaps, ask } = rotaIssues(rota);
   const locked = rota.locked || {};
@@ -864,15 +888,15 @@ function rotaView() {
     const slot = h => {
       const s = slotInfo(rota, dt, h), key = slotKey(dt, h);
       const pin = locked[key] && s.status !== "agreed" ? `<span class="pin" title="Set by hand">●</span>` : "";
-      if (!s.id) return `<button class="slot empty" data-act="slot" data-dt="${dt}" data-h="${h}"><span class="h">${esc(halfName(h).slice(0, 1))}</span><span class="nm">Uncovered</span></button>`;
-      return `<button class="slot ${s.status === "ask" ? "ask" : ""}" style="--pc:${colorOf(s.id)}" data-act="slot" data-dt="${dt}" data-h="${h}" title="${esc(halfName(h))} ${esc(halfTime(h))}: ${esc(nameOf(s.id))}${s.status === "ask" ? " (didn’t mark available)" : ""}"><span class="h">${esc(halfName(h).slice(0, 1))}</span><span class="nm">${esc(nameOf(s.id))}</span>${mark(s) || pin}</button>`;
+      if (!s.id) return `<button class="slot empty" data-act="slot" ${slotOff} data-dt="${dt}" data-h="${h}"><span class="h">${esc(halfName(h).slice(0, 1))}</span><span class="nm">Uncovered</span></button>`;
+      return `<button class="slot ${s.status === "ask" ? "ask" : ""}" style="--pc:${colorOf(s.id)}" data-act="slot" ${slotOff} data-dt="${dt}" data-h="${h}" title="${esc(halfName(h))} ${esc(halfTime(h))}: ${esc(nameOf(s.id))}${s.status === "ask" ? " (didn’t mark available)" : ""}"><span class="h">${esc(halfName(h).slice(0, 1))}</span><span class="nm">${esc(nameOf(s.id))}</span>${mark(s) || pin}</button>`;
     };
     let inner;
     if (a.am && a.am === a.pm) {
       const s0 = slotInfo(rota, dt, 0), s1 = slotInfo(rota, dt, 1);
       const worst = s0.status === "ask" || s1.status === "ask" ? s0.status === "ask" ? s0 : s1 : s0.status === "agreed" ? s0 : s1;
       const pin = (locked[slotKey(dt, 0)] || locked[slotKey(dt, 1)]) && worst.status === "ok" ? `<span class="pin">●</span>` : "";
-      inner = `<button class="slot full ${worst.status === "ask" ? "ask" : ""}" style="--pc:${colorOf(a.am)}" data-act="slot" data-dt="${dt}" data-h="0" title="Full shift: ${esc(nameOf(a.am))}"><span class="nm">${esc(nameOf(a.am))}</span><span class="h">Full shift ${pin}</span>${mark(worst)}</button>`;
+      inner = `<button class="slot full ${worst.status === "ask" ? "ask" : ""}" style="--pc:${colorOf(a.am)}" data-act="slot" ${slotOff} data-dt="${dt}" data-h="0" title="Full shift: ${esc(nameOf(a.am))}"><span class="nm">${esc(nameOf(a.am))}</span><span class="h">Full shift ${pin}</span>${mark(worst)}</button>`;
     } else inner = slot(0) + slot(1);
     cells += `<div class="day rday ${isWeekend(dt) ? "we" : ""}"><span class="num"><span>${dayLabel(dt, i)}</span><span class="wd">${WD[dowOf(dt)]}</span></span><div class="slots">${inner}</div></div>`;
   });
@@ -906,19 +930,19 @@ function rotaView() {
         <h2>${gaps.length ? `${gaps.length} half-shift${gaps.length > 1 ? "s" : ""} uncovered` : ask.length ? `All covered · ${ask.length} half-shift${ask.length > 1 ? "s" : ""} to check` : "Every shift is covered"}</h2></div>
       <div class="row">
         <button class="btn" data-act="copy">Copy as table</button>
-        <button class="btn" data-act="regen" ${S.readOnly ? "disabled" : ""}>Try another option</button>
-        <button class="btn primary" data-act="generate" ${S.readOnly ? "disabled" : ""}>${busy}Rebuild</button>
+        ${manage ? `<button class="btn" data-act="regen">Try another option</button>
+        <button class="btn primary" data-act="generate">${busy}Rebuild</button>` : ""}
       </div>
     </div>
-    ${ask.length ? `<div class="banner warn"><div class="stack" style="gap:6px"><strong>Check with these people</strong><span style="font-size:.88rem">Nobody offered these shifts, so the planner picked whoever had done the least and had the longest break. Tap a shift to mark it agreed or swap the person.</span><ul class="asklist">${askList}</ul></div></div>` : ""}
+    ${ask.length ? `<div class="banner warn"><div class="stack" style="gap:6px"><strong>Check with these people</strong><span style="font-size:.88rem">Nobody offered these shifts, so the planner picked whoever had done the least and had the longest break.${manage ? " Tap a shift to mark it agreed or swap the person." : " The organiser will confirm them with you."}</span><ul class="asklist">${askList}</ul></div></div>` : ""}
     ${gaps.length ? `<div class="banner gap"><span>Left uncovered by hand: ${gaps.map(([dt, h]) => `${shortDate(dt)} (${esc(halfName(h).toLowerCase())})`).join(", ")}. Rebuild to fill them.</span></div>` : ""}
     <div class="cal rota">${cells}</div>
-    <div class="legend"><span>Tap a shift to change who’s on call.</span><span><span class="q" style="font-size:.64rem;font-weight:700;color:var(--warn);background:var(--warn-soft);border-radius:4px;padding:0 4px">CHECK</span> didn’t mark available</span><span style="color:var(--ok)">✓ agreed</span>${handCount ? `<span>● set by hand · kept when rebuilding · <button class="linkbtn" data-act="clear-locks">Clear hand changes</button></span>` : ""}${when ? `<span>Built ${esc(when)}</span>` : ""}</div>
+    <div class="legend">${manage ? "<span>Tap a shift to change who’s on call.</span>" : ""}<span><span class="q" style="font-size:.64rem;font-weight:700;color:var(--warn);background:var(--warn-soft);border-radius:4px;padding:0 4px">CHECK</span> didn’t mark available</span><span style="color:var(--ok)">✓ agreed</span>${handCount && manage ? `<span>● set by hand · kept when rebuilding · <button class="linkbtn" data-act="clear-locks">Clear hand changes</button></span>` : ""}${when ? `<span>Built ${esc(when)}</span>` : ""}</div>
   </section>
   <section class="panel">
     <div class="stack" style="gap:2px"><span class="eyebrow">Fairness</span><h2>How the shifts are shared</h2><p class="muted" style="font-size:.88rem">The planner evens out on-call and weekend days across this fortnight and the previous three, with recent fortnights counting most.</p></div>
     <div class="scroll"><table class="tbl"><thead><tr><th>Person</th><th>Full shifts</th><th>Half shifts</th><th>Days on call</th><th>Weekend days</th><th>${esc(halfName(1))} halves</th><th>To check</th><th>Previous 6 weeks</th><th></th></tr></thead><tbody>${statRows}</tbody></table></div>
-    ${opts}
+    ${manage ? opts : ""}
   </section>`;
 }
 
@@ -958,6 +982,7 @@ function teamView(first) {
   ${S.mode === "shared" ? `<section class="panel">
     <div class="stack" style="gap:4px"><span class="eyebrow">Sharing</span><h2>Team link</h2>
       <p class="muted" style="font-size:.88rem">Send this link to everyone on the rota. Opening it on a phone or computer is all they need to do; no account or app. Anyone with the link can view and edit, so keep it within the team.</p></div>
+    <p style="font-size:.88rem"><strong>You’re the organiser on this device.</strong> <span class="muted">Only your organiser link can build the rota, change shifts and edit the team. It’s in the Setup tab of the Google Sheet; keep it to yourself. Your team’s link below lets them see the rota and add their own availability.</span></p>
     <div class="row" style="flex-wrap:nowrap"><input class="input mono" id="team-link" readonly value="${esc(teamLink())}" style="font-size:.78rem"><button class="btn" data-act="copy-link">Copy</button></div>
     ${sheetUrl ? `<p style="font-size:.88rem"><a href="${esc(sheetUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Open the Google Sheet</a> <span class="muted">to see availability and each fortnight’s rota as tables.</span></p>` : ""}
   </section>` : ""}`;
@@ -1020,10 +1045,10 @@ function handle(e) {
     case "brush": S.brush = el.dataset.b; render(); break;
     case "paint": paint(el.dataset.dt); break;
     case "fill": fillDays(el.dataset.w); break;
-    case "generate": generate(false); break;
-    case "regen": generate(true); break;
+    case "generate": if (canManage()) generate(false); break;
+    case "regen": if (canManage()) generate(true); break;
     case "copy": copyRota(); break;
-    case "slot": S.sheet = { kind: "slot", dt: el.dataset.dt, h: Number(el.dataset.h) }; renderLayer(); break;
+    case "slot": if (!canManage()) break; S.sheet = { kind: "slot", dt: el.dataset.dt, h: Number(el.dataset.h) }; renderLayer(); break;
     case "sheet-half": S.sheet.h = Number(el.dataset.h); renderLayer(); break;
     case "pick": setSlot(S.sheet.dt, S.sheet.h, el.dataset.id || null); break;
     case "agree": setAgreed(S.sheet.dt, S.sheet.h, el.dataset.v === "1"); break;
@@ -1083,17 +1108,22 @@ document.addEventListener("keydown", e => {
 /* ---------- boot ---------- */
 (() => {
   // The team link carries the key after #k=; keep it on this device and tidy it out of the address bar.
-  const m = /[#&]k=([A-Za-z0-9_-]+)/.exec(location.hash);
-  if (m) { lsSet("rota-key", m[1]); try { history.replaceState(null, "", location.pathname + location.search); } catch {} }
+  // An organiser link also carries &a=<organiser key>.
+  const m = /[#&]k=([A-Za-z0-9_-]+)/.exec(location.hash), a = /[#&]a=([A-Za-z0-9_-]+)/.exec(location.hash);
+  if (m) {
+    lsSet("rota-key", m[1]); lsSet("rota-admin", a ? a[1] : (lsGet("rota-key") === m[1] ? lsGet("rota-admin") || "" : ""));
+    try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+  }
   teamKey = (m && m[1]) || lsGet("rota-key") || null;
+  adminKey = (a && a[1]) || lsGet("rota-admin") || null;
   if (!API) { S.mode = "local"; loadLocal(); render(); }
   else if (!teamKey) { S.mode = "join"; render(); }
   else startShared();
 })();
 // Someone pastes a team link into the address bar of an already-open page.
 window.addEventListener("hashchange", () => {
-  const m = /[#&]k=([A-Za-z0-9_-]+)/.exec(location.hash);
-  if (!m || !API) return;
+  const hash = location.hash;
+  if (!/[#&]k=/.test(hash) || !API) return;
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
-  if (m[1] !== teamKey) joinWith(m[1]);
+  joinWith(hash);
 });

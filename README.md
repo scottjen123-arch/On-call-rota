@@ -9,6 +9,8 @@ A fortnightly on-call rota for a small team. Each person marks the days they can
 
 The page is plain HTML/JS hosted on GitHub Pages. Data is saved in a Google Sheet you own, through a small Apps Script. Nobody needs an account: the team link opens it.
 
+There are two links. The **team link** lets people see the rota and enter their own availability. The **organiser link** also lets you build the rota, change shifts and edit the team. Only the Google Sheet knows the organiser key, so nobody else can build the rota even if they edit the page.
+
 ## Setup (about 15 minutes, once)
 
 ### 1. Google Sheet
@@ -18,7 +20,7 @@ The page is plain HTML/JS hosted on GitHub Pages. Data is saved in a Google Shee
 3. Delete what's in the editor, paste in everything from [`apps-script/Code.gs`](apps-script/Code.gs), and click **Save**.
 4. In the function dropdown at the top, choose **setup**, then click **Run**.
    - Google asks you to authorise it. Choose your account, then **Advanced → Go to (project name) (unsafe)** → **Allow**. ("Unsafe" only means Google hasn't reviewed your own script.)
-   - The sheet now has a **Setup** tab with your **team key**.
+   - The sheet now has a **Setup** tab with your **team key** and **organiser key**.
 5. Click **Deploy → New deployment**. Click the cog next to "Select type" and choose **Web app**.
    - **Execute as:** Me
    - **Who has access:** Anyone
@@ -42,14 +44,15 @@ In the repository on GitHub: **Settings → Pages → Build and deployment**, se
 
 ### 4. Your team link
 
-Back in the Google Sheet's **Setup** tab, paste the site address into **B3**. **B4** then shows the **team link**: the site address plus `#k=` and your team key. Open it yourself first, add the team, then send the same link to everyone on the rota. It's also shown in the app under **Team & shifts → Team link**.
+Back in the Google Sheet's **Setup** tab, paste the site address into **B3**. **B4** then shows the **team link** and **B7** your **organiser link**. Open the organiser link yourself first and add the team. Then send the team link (not the organiser link) to everyone on the rota. The team link is also shown in the app under **Team & shifts → Team link**.
 
 Each person opens the link once on their phone. It's remembered after that, and they can add it to their home screen.
 
 ## Good to know
 
-- **Anyone with the team link can view and change the rota**, so keep it within the team. If it leaks, run `resetTeamKey` in Apps Script: the old link stops working and the Setup tab shows the new one.
+- Anyone with the team link can see the rota and change availability, so keep it within the team. If it leaks, run `resetTeamKey` in Apps Script: the old link stops working and the Setup tab shows the new one.
+- Keep the organiser link to yourself. If it leaks, run `resetOrganiserKey`.
 - The repository's code and the Web app URL are public. That's fine: every request needs the team key, which only lives in the sheet and in the team link.
 - The sheet keeps the data in a hidden `_data` tab. Don't edit it by hand. The **Availability** tab and the **Rota …** tabs are readable copies that update automatically.
 - Changes from other people show up within about 20 seconds.
-- If you change `Code.gs` later, use **Deploy → Manage deployments → Edit → New version** so the Web app URL stays the same.
+- If you change `Code.gs` later, run `setup` again (it keeps your keys and site address), then use **Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy** so the Web app URL stays the same.

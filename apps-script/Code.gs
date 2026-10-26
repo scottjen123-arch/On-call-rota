@@ -9,7 +9,10 @@
  *   availability/<YYYY-MM>_<id>    one person's availability for one calendar month
  *   rotas/<YYYY-MM-DD>             one fortnight's rota
  * Readable copies are kept in an "Availability" tab and one "Rota …" tab per fortnight.
- * Every request must carry the team key, which `setup` creates and shows on the "Setup" tab.
+ * Every request must carry the team key. Saving a rota or changing the team also needs the
+ * organiser key, so only the organiser can build or edit the rota; everyone with the team key
+ * can see it and enter their own availability. `setup` creates both keys and shows them, with
+ * the matching links, on the "Setup" tab.
  */
 
 const DATA_SHEET = "_data";
@@ -22,22 +25,27 @@ function setup() {
   data.hideSheet();
 
   const props = PropertiesService.getScriptProperties();
+  const newKey = () => Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "").slice(0, 8);
   let key = props.getProperty("TEAM_KEY");
-  if (!key) {
-    key = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "").slice(0, 8);
-    props.setProperty("TEAM_KEY", key);
-  }
+  if (!key) { key = newKey(); props.setProperty("TEAM_KEY", key); }
+  let admin = props.getProperty("ADMIN_KEY");
+  if (!admin) { admin = newKey(); props.setProperty("ADMIN_KEY", admin); }
 
   const s = ss.getSheetByName("Setup") || ss.insertSheet("Setup", 0);
+  const site = String(s.getRange("B3").getValue() || "");
   s.clear();
-  s.getRange("A1:B5").setValues([
+  const base = 'B3&IF(RIGHT(B3,1)="/","","/")';
+  s.getRange("A1:B8").setValues([
     ["Team key", key],
     ["", ""],
-    ["Rota website", ""],
-    ["Team link", '=IF(B3="","Paste your GitHub Pages address into B3",B3&IF(RIGHT(B3,1)="/","","/")&"#k="&B1)'],
-    ["", "Send the team link to everyone on the rota. Anyone with it can view and edit the rota, so keep it within the team."],
+    ["Rota website", site],
+    ["Team link", '=IF(B3="","Paste your GitHub Pages address into B3",' + base + '&"#k="&B1)'],
+    ["", "Send the team link to everyone on the rota. They can see the rota and enter their own availability."],
+    ["Organiser key", admin],
+    ["Organiser link", '=IF(B3="","Paste your GitHub Pages address into B3",' + base + '&"#k="&B1&"&a="&B6)'],
+    ["", "Keep the organiser link to yourself. Only it can build the rota, change shifts and edit the team."],
   ]);
-  s.getRange("A1:A4").setFontWeight("bold");
+  s.getRange("A1:A7").setFontWeight("bold");
   s.setColumnWidth(1, 120);
   s.setColumnWidth(2, 640);
   Logger.log("Setup done. Team key: " + key);
@@ -49,6 +57,12 @@ function resetTeamKey() {
   setup();
 }
 
+/** Run this only if the organiser link has leaked: it makes a new organiser key. */
+function resetOrganiserKey() {
+  PropertiesService.getScriptProperties().deleteProperty("ADMIN_KEY");
+  setup();
+}
+
 function doGet() {
   return json_({ ok: true, service: "on-call-rota" });
 }
@@ -56,16 +70,19 @@ function doGet() {
 function doPost(e) {
   let req = {};
   try { req = JSON.parse((e && e.postData && e.postData.contents) || "{}"); } catch (err) { return json_({ ok: false, error: "bad_request" }); }
-  const key = PropertiesService.getScriptProperties().getProperty("TEAM_KEY");
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty("TEAM_KEY"), adminKey = props.getProperty("ADMIN_KEY");
   if (!key) return json_({ ok: false, error: "not_set_up" });
   if (req.k !== key) return json_({ ok: false, error: "bad_key" });
+  const isAdmin = !!adminKey && req.a === adminKey;
 
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(15000);
-    if (req.action === "load") return json_(Object.assign({ ok: true }, load_(req.months)));
+    if (req.action === "load") return json_(Object.assign({ ok: true, admin: isAdmin }, load_(req.months)));
     if (req.action === "set" || req.action === "delete") {
       if (!PATH_RE.test(String(req.path || ""))) return json_({ ok: false, error: "bad_path" });
+      if (String(req.path).indexOf("availability/") !== 0 && !isAdmin) return json_({ ok: false, error: "organiser_only" });
       if (req.action === "set" && (typeof req.data !== "object" || req.data === null || Array.isArray(req.data))) return json_({ ok: false, error: "bad_data" });
       const text = req.action === "set" ? JSON.stringify(req.data) : null;
       if (text && text.length > 45000) return json_({ ok: false, error: "too_big" });
