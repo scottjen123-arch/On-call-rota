@@ -441,8 +441,7 @@ function joinWith(input) {
   const k = /[#&]k=([A-Za-z0-9_-]+)/.exec(str), a = /[#&]a=([A-Za-z0-9_-]+)/.exec(str);
   const key = k ? k[1] : str;
   if (!/^[A-Za-z0-9_-]{8,}$/.test(key)) { S.joinError = "That doesn’t look like a team key. Paste the whole team link or the key from the Setup tab."; render(); return; }
-  if (a) adminKey = a[1];
-  else if (key !== teamKey) adminKey = null;
+  adminKey = a ? a[1] : null; // a team link (or bare team key) always opens the team view
   teamKey = key; lsSet("rota-key", key); lsSet("rota-admin", adminKey || "");
   startShared();
 }
@@ -982,7 +981,7 @@ function teamView(first) {
   ${S.mode === "shared" ? `<section class="panel">
     <div class="stack" style="gap:4px"><span class="eyebrow">Sharing</span><h2>Team link</h2>
       <p class="muted" style="font-size:.88rem">Send this link to everyone on the rota. Opening it on a phone or computer is all they need to do; no account or app. Anyone with the link can view and edit, so keep it within the team.</p></div>
-    <p style="font-size:.88rem"><strong>You’re the organiser on this device.</strong> <span class="muted">Only your organiser link can build the rota, change shifts and edit the team. It’s in the Setup tab of the Google Sheet; keep it to yourself. Your team’s link below lets them see the rota and add their own availability.</span></p>
+    <p style="font-size:.88rem"><strong>You’re the organiser on this device.</strong> <span class="muted">Only your organiser link can build the rota, change shifts and edit the team. It’s in the Setup tab of the Google Sheet; keep it to yourself. Your team’s link below lets them see the rota and add their own availability. If you open the team link on this device, it switches to the team view; open your organiser link again to switch back.</span></p>
     <div class="row" style="flex-wrap:nowrap"><input class="input mono" id="team-link" readonly value="${esc(teamLink())}" style="font-size:.78rem"><button class="btn" data-act="copy-link">Copy</button></div>
     ${sheetUrl ? `<p style="font-size:.88rem"><a href="${esc(sheetUrl)}" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Open the Google Sheet</a> <span class="muted">to see availability and each fortnight’s rota as tables.</span></p>` : ""}
   </section>` : ""}`;
@@ -1108,14 +1107,15 @@ document.addEventListener("keydown", e => {
 /* ---------- boot ---------- */
 (() => {
   // The team link carries the key after #k=; keep it on this device and tidy it out of the address bar.
-  // An organiser link also carries &a=<organiser key>.
+  // An organiser link also carries &a=<organiser key>. Opening a link sets this device to exactly
+  // that link's view; with no link, the device keeps whichever it opened last.
   const m = /[#&]k=([A-Za-z0-9_-]+)/.exec(location.hash), a = /[#&]a=([A-Za-z0-9_-]+)/.exec(location.hash);
   if (m) {
-    lsSet("rota-key", m[1]); lsSet("rota-admin", a ? a[1] : (lsGet("rota-key") === m[1] ? lsGet("rota-admin") || "" : ""));
+    lsSet("rota-key", m[1]); lsSet("rota-admin", a ? a[1] : "");
     try { history.replaceState(null, "", location.pathname + location.search); } catch {}
   }
   teamKey = (m && m[1]) || lsGet("rota-key") || null;
-  adminKey = (a && a[1]) || lsGet("rota-admin") || null;
+  adminKey = m ? (a ? a[1] : null) : lsGet("rota-admin") || null;
   if (!API) { S.mode = "local"; loadLocal(); render(); }
   else if (!teamKey) { S.mode = "join"; render(); }
   else startShared();
